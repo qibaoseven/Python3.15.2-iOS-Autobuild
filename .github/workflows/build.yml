@@ -17,14 +17,14 @@ jobs:
     - name: Setup Host Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.13'
+        python-version: '3.15'
 
     - name: Download & Build Python 3.15.2
       run: |
         curl -O https://www.python.org/ftp/python/3.15.2/Python-3.15.2.tgz
         tar -xzf Python-3.15.2.tgz
         pip3 install xbuild
-        xbuild --platform ios --arch arm64 --out built_deps openssl
+        xbuild --platform ios --arch arm64-iphoneos --out built_deps openssl
         
         cd Python-3.15.2
         export SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
