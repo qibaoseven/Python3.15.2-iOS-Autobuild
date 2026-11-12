@@ -17,19 +17,31 @@ jobs:
     - name: Setup Host Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.15'
+        python-version: '3.13'
 
     - name: Download & Build Python 3.15.2
       run: |
+        # 修复点 1：先克隆 OpenSSL 源码，xbuild 需要这个目录
+        git clone --depth 1 --branch openssl-3.3.2 https://github.com/openssl/openssl.git
+        
+        pip3 install xbuild
+        
+        # 修复点 2：指定 ./openssl 目录进行编译
+        xbuild --platform ios --arch arm64-iphoneos --out built_deps ./openssl
+        
+        # 导出依赖路径给后续 Python 编译使用
+        export DEPS_INC="$(pwd)/built_deps/include"
+        export DEPS_LIB="$(pwd)/built_deps/lib"
+        
         curl -O https://www.python.org/ftp/python/3.15.2/Python-3.15.2.tgz
         tar -xzf Python-3.15.2.tgz
-        pip3 install xbuild
-        xbuild --platform ios --arch arm64-iphoneos --out built_deps openssl
         
         cd Python-3.15.2
         export SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
-        export CFLAGS="-O3 -mcpu=apple-m4 -target arm64-apple-ios -isysroot $SDK_PATH -I$(pwd)/../built_deps/include -flto -fno-strict-aliasing -fno-strict-overflow"
-        export LDFLAGS="-target arm64-apple-ios -isysroot $SDK_PATH -L$(pwd)/../built_deps/lib -flto -Wl,-dead_strip"
+        
+        # 注入 M4 极限优化和刚编译好的 OpenSSL 路径
+        export CFLAGS="-O3 -mcpu=apple-m4 -target arm64-apple-ios -isysroot $SDK_PATH -I$DEPS_INC -flto -fno-strict-aliasing -fno-strict-overflow"
+        export LDFLAGS="-target arm64-apple-ios -isysroot $SDK_PATH -L$DEPS_LIB -flto -Wl,-dead_strip"
         
         ./configure \
           --host=arm64-apple-ios \
@@ -56,7 +68,7 @@ jobs:
       run: |
         mkdir -p TerminalApp/Payload
 
-        # 1. 注入 C 桥接头文件 (用于 Swift 和 CPython 交互)
+        # 1. 注入 C 桥接头文件
         cat << 'EOF' > TerminalApp/bridge.h
         #ifndef BRIDGE_H
         #define BRIDGE_H
@@ -67,7 +79,7 @@ jobs:
         #endif
         EOF
 
-        # 2. 注入 C 桥接实现 (处理重定向与 Readline 阻塞)
+        # 2. 注入 C 桥接实现
         cat << 'EOF' > TerminalApp/bridge.c
         #include "bridge.h"
         #include <stdio.h>
@@ -107,14 +119,12 @@ jobs:
         void start_python_interpreter(void) {
             Py_Initialize();
             
-            // 注入模块供 Python 调用
             PyObject* module = PyModule_Create(&bridgemodule);
             PyImport_AddModule("swiftterm_bridge");
             PyObject* sys_modules = PyImport_GetModuleDict();
             PyDict_SetItemString(sys_modules, "swiftterm_bridge", module);
             Py_DECREF(module);
 
-            // 重定向 stdout / stderr
             const char* redirect_code = 
                 "import sys\n"
                 "import swiftterm_bridge\n"
@@ -126,7 +136,6 @@ jobs:
                 "sys.stderr = TerminalOutput()\n";
             PyRun_SimpleString(redirect_code);
 
-            // 设置输入 Hook，启动循环
             PyOS_ReadlineFunctionPointer = readline_hook;
             PyRun_InteractiveLoop(stdin, "<stdin>");
             Py_Finalize();
@@ -164,7 +173,7 @@ jobs:
             
             func provideInput(prompt: String?) -> UnsafeMutablePointer<CChar>? {
                 if let p = prompt { writeToTerminal(p) }
-                semaphore.wait() // 阻塞 C 线程，等待 Swift UI 输入
+                semaphore.wait() 
                 
                 let result = strdup(inputBuffer)
                 inputBuffer = ""
@@ -175,7 +184,6 @@ jobs:
                 if let str = String(bytes: data, encoding: .utf8) {
                     inputBuffer += str
                     if str.contains("\r") || str.contains("\n") {
-                        // 替换为换行，并触发阻塞的信号
                         inputBuffer = inputBuffer.replacingOccurrences(of: "\r", with: "\n")
                         semaphore.signal()
                     }
@@ -225,14 +233,12 @@ jobs:
                 
                 PythonState.shared.terminalView = terminal
                 
-                // 设置 C 回调
                 set_swift_callbacks(writeCallback, readCallback)
                 
-                // 启动 Python
                 DispatchQueue.global(qos: .userInitiated).async {
                     start_python_interpreter()
                     DispatchQueue.main.async {
-                        exit(0) // Python 退出时，直接退出应用
+                        exit(0) 
                     }
                 }
                 
@@ -250,20 +256,14 @@ jobs:
                         TerminalRepresentable()
                             .ignoresSafeArea()
                         
-                        // 键盘上方快捷键栏
                         HStack(spacing: 12) {
                             Button("Ctrl") { 
-                                // 模拟发送 Ctrl-C
                                 PythonState.shared.handleKeyboardInput([0x03]) 
                             }.buttonStyle(.bordered).tint(.gray)
                             
-                            Button("Opt") { 
-                                // 发送 Opt 特殊字符占位
-                            }.buttonStyle(.bordered).tint(.gray)
+                            Button("Opt") { }.buttonStyle(.bordered).tint(.gray)
                             
-                            Button("Cmd") { 
-                                // 发送 Cmd 特殊字符占位
-                            }.buttonStyle(.bordered).tint(.gray)
+                            Button("Cmd") { }.buttonStyle(.bordered).tint(.gray)
                         }
                         .padding()
                         .background(Color.black.opacity(0.8))
