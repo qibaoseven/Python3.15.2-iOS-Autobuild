@@ -21,25 +21,32 @@ jobs:
 
     - name: Download & Build Python 3.15.2
       run: |
-        # 修复点 1：先克隆 OpenSSL 源码，xbuild 需要这个目录
+        # 1. 克隆 OpenSSL 源码
         git clone --depth 1 --branch openssl-3.3.2 https://github.com/openssl/openssl.git
         
-        pip3 install xbuild
+        # 2. 交叉编译 OpenSSL for iOS (使用官方 Configure 脚本)
+        cd openssl
+        export CROSS_TOP=$(xcode-select -p)/Platforms/iPhoneOS.platform/Developer
+        export CROSS_SDK=iPhoneOS.sdk
+        export CROSS_COMPILE=$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/bin/
         
-        # 修复点 2：指定 ./openssl 目录进行编译
-        xbuild --platform ios --arch arm64-iphoneos --out built_deps ./openssl
+        ./Configure ios64-cross no-shared no-dso no-async --prefix=$(pwd)/../built_deps
+        make -j$(sysctl -n hw.ncpu)
+        make install_sw
+        cd ..
         
-        # 导出依赖路径给后续 Python 编译使用
+        # 3. 导出依赖路径
         export DEPS_INC="$(pwd)/built_deps/include"
         export DEPS_LIB="$(pwd)/built_deps/lib"
         
+        # 4. 下载 Python 源码
         curl -O https://www.python.org/ftp/python/3.15.2/Python-3.15.2.tgz
         tar -xzf Python-3.15.2.tgz
         
+        # 5. 进入 Python 目录开始交叉编译
         cd Python-3.15.2
         export SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
         
-        # 注入 M4 极限优化和刚编译好的 OpenSSL 路径
         export CFLAGS="-O3 -mcpu=apple-m4 -target arm64-apple-ios -isysroot $SDK_PATH -I$DEPS_INC -flto -fno-strict-aliasing -fno-strict-overflow"
         export LDFLAGS="-target arm64-apple-ios -isysroot $SDK_PATH -L$DEPS_LIB -flto -Wl,-dead_strip"
         
