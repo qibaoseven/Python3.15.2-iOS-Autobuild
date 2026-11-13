@@ -31,14 +31,14 @@ jobs:
           key: ${{ runner.os }}-deps-openssl-3.3.2-libffi-3.4.8-v1
 
       # ---------------------------------------------------------
-      # 缓存机制 3：缓存编译好的交叉编译 Python 目录
+      # 缓存机制 3：缓存编译好的交叉编译 Python 目录 (升级到 v3)
       # ---------------------------------------------------------
       - name: Cache Compiled CPython
         id: cache-cpython
         uses: actions/cache@v4
         with:
           path: Python-3.16.0a2
-          key: ${{ runner.os }}-cpython-3.16.0a2-m4-v2
+          key: ${{ runner.os }}-cpython-3.16.0a2-m4-v3
 
       # ---------------------------------------------------------
       # 阶段 1：获取源码并编译 macOS 宿主 Python 3.16
@@ -74,7 +74,7 @@ jobs:
           make -j$(sysctl -n hw.ncpu) && make install_sw
           cd ..
 
-          # 2. 编译 libffi 3.4.8
+          # 2. 编译 libffi 3.4.8 (修复 CFI 汇编错误)
           curl -L -O https://github.com/libffi/libffi/releases/download/v3.4.8/libffi-3.4.8.tar.gz
           tar -xzf libffi-3.4.8.tar.gz
           cd libffi-3.4.8
@@ -105,6 +105,7 @@ jobs:
           export DEPS_INC="$(pwd)/../built_deps/include"
           export DEPS_LIB="$(pwd)/../built_deps/lib"
           
+          # 编译器工具链配置
           export CC="$(xcrun --sdk iphoneos -f clang)"
           export CPP="$(xcrun --sdk iphoneos -f clang) -E"
           export AR="$(xcrun -f ar)"
@@ -113,8 +114,15 @@ jobs:
           export LLVM_PROFDATA="$(xcrun -f llvm-profdata 2>/dev/null || echo 'true')"
           export MODULE_BUILDTYPE=static
           
+          # libffi 链接配置
           export LIBFFI_CFLAGS="-I$DEPS_INC"
           export LIBFFI_LIBS="-L$DEPS_LIB -lffi"
+          
+          # 彻底隔离宿主机的 zstd 探测，防止链接到 macOS 的 dylib
+          export PKG_CONFIG_PATH=""
+          export PKG_CONFIG_LIBDIR=""
+          export LIBZSTD_CFLAGS=""
+          export LIBZSTD_LIBS=""
           
           export CFLAGS="-O3 -mcpu=apple-m4 -target arm64-apple-ios -isysroot $SDK_PATH -I$DEPS_INC -flto -fno-strict-aliasing -fno-strict-overflow"
           export LDFLAGS="-target arm64-apple-ios -isysroot $SDK_PATH -L$DEPS_LIB -flto -Wl,-dead_strip"
