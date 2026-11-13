@@ -22,7 +22,6 @@ jobs:
 
       # ---------------------------------------------------------
       # 缓存机制 2：缓存第三方依赖 (OpenSSL + libffi)
-      # key 中 libffi 版本已更新为 3.4.8，确保旧缓存失效
       # ---------------------------------------------------------
       - name: Cache Third-party Dependencies
         id: cache-deps
@@ -39,7 +38,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: Python-3.16.0a2
-          key: ${{ runner.os }}-cpython-3.16.0a2-m4-v1
+          key: ${{ runner.os }}-cpython-3.16.0a2-m4-v2
 
       # ---------------------------------------------------------
       # 阶段 1：获取源码并编译 macOS 宿主 Python 3.16
@@ -75,7 +74,7 @@ jobs:
           make -j$(sysctl -n hw.ncpu) && make install_sw
           cd ..
 
-          # 2. 编译 libffi 3.4.8 (修复 CFI 汇编错误)
+          # 2. 编译 libffi 3.4.8
           curl -L -O https://github.com/libffi/libffi/releases/download/v3.4.8/libffi-3.4.8.tar.gz
           tar -xzf libffi-3.4.8.tar.gz
           cd libffi-3.4.8
@@ -127,8 +126,9 @@ jobs:
             --with-build-python=$HOST_PYTHON \
             --enable-optimizations --with-lto=full \
             --with-tail-call-interp --with-computed-gotos \
-            --with-system-ffi
-          
+            --with-system-ffi \
+            --without-zstd
+            
           make -j$(sysctl -n hw.ncpu) MODULE_BUILDTYPE=static
           cd ..
 
