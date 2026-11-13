@@ -22,13 +22,14 @@ jobs:
 
       # ---------------------------------------------------------
       # 缓存机制 2：缓存第三方依赖 (OpenSSL + libffi)
+      # key 中 libffi 版本已更新为 3.4.8，确保旧缓存失效
       # ---------------------------------------------------------
       - name: Cache Third-party Dependencies
         id: cache-deps
         uses: actions/cache@v4
         with:
           path: built_deps
-          key: ${{ runner.os }}-deps-openssl-3.3.2-libffi-3.4.6-v1
+          key: ${{ runner.os }}-deps-openssl-3.3.2-libffi-3.4.8-v1
 
       # ---------------------------------------------------------
       # 缓存机制 3：缓存编译好的交叉编译 Python 目录
@@ -59,7 +60,7 @@ jobs:
           cd ..
 
       # ---------------------------------------------------------
-      # 阶段 2：交叉编译 OpenSSL 与 libffi (仅 iOS 真机)
+      # 阶段 2：交叉编译 OpenSSL 与 libffi 3.4.8 (仅 iOS 真机)
       # ---------------------------------------------------------
       - name: Download & Build OpenSSL and libffi for iOS
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -74,10 +75,10 @@ jobs:
           make -j$(sysctl -n hw.ncpu) && make install_sw
           cd ..
 
-          # 2. 编译 libffi (使用 Release Tarball 避免 autoreconf 报错)
-          curl -L -O https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz
-          tar -xzf libffi-3.4.6.tar.gz
-          cd libffi-3.4.6
+          # 2. 编译 libffi 3.4.8 (修复 CFI 汇编错误)
+          curl -L -O https://github.com/libffi/libffi/releases/download/v3.4.8/libffi-3.4.8.tar.gz
+          tar -xzf libffi-3.4.8.tar.gz
+          cd libffi-3.4.8
           export SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           export CC="$(xcrun --sdk iphoneos -f clang)"
           ./configure \
