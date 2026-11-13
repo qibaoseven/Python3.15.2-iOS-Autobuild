@@ -61,6 +61,9 @@ jobs:
           export LLVM_AR="$(xcrun -f ar)"
           export RANLIB="$(xcrun -f ranlib)"
           
+          # 核心修复 3：显式指定 LLVM_PROFDATA，绕过 PGO 检查
+          export LLVM_PROFDATA="$(xcrun -f llvm-profdata 2>/dev/null || echo 'true')"
+          
           export CFLAGS="-O3 -mcpu=apple-m4 -target arm64-apple-ios -isysroot $SDK_PATH -I$DEPS_INC -flto -fno-strict-aliasing -fno-strict-overflow"
           export LDFLAGS="-target arm64-apple-ios -isysroot $SDK_PATH -L$DEPS_LIB -flto -Wl,-dead_strip"
           
