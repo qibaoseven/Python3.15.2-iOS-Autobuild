@@ -21,7 +21,6 @@ jobs:
       - name: Build macOS Host Python
         run: |
           cd Python-3.16.0a2
-          # 编译 macOS 版本作为宿主（Host），专用于提供 --with-build-python
           ./configure --prefix=$(pwd)/../host_python --enable-optimizations
           make -j$(sysctl -n hw.ncpu)
           make install
@@ -53,8 +52,9 @@ jobs:
           export DEPS_INC="$(pwd)/../built_deps/include"
           export DEPS_LIB="$(pwd)/../built_deps/lib"
           
-          # 修复核心：显式指定 CC，并清理可能引起冲突的默认 CFLAGS
+          # 核心修复：显式指定 CC 和 CPP，防止 configure 回退到 gcc
           export CC="$(xcrun --sdk iphoneos -f clang)"
+          export CPP="$(xcrun --sdk iphoneos -f clang) -E"
           export CFLAGS="-O3 -mcpu=apple-m4 -target arm64-apple-ios -isysroot $SDK_PATH -I$DEPS_INC -flto -fno-strict-aliasing -fno-strict-overflow"
           export LDFLAGS="-target arm64-apple-ios -isysroot $SDK_PATH -L$DEPS_LIB -flto -Wl,-dead_strip"
           
@@ -83,7 +83,6 @@ jobs:
         run: |
           mkdir -p TerminalApp/Payload
 
-          # 1. 注入 C 桥接头文件
           cat << 'EOF' > TerminalApp/bridge.h
           #ifndef BRIDGE_H
           #define BRIDGE_H
@@ -93,7 +92,6 @@ jobs:
           #endif
           EOF
 
-          # 2. 注入 C 桥接实现
           cat << 'EOF' > TerminalApp/bridge.c
           #include "bridge.h"
           #include <Python.h>
@@ -159,13 +157,11 @@ jobs:
           }
           EOF
 
-          # 3. 注入 Swift UI 及交互逻辑
           cat << 'EOF' > TerminalApp/main.swift
           import SwiftUI
           import SwiftTerm
           import UIKit
 
-          // MARK: - C 桥接声明
           @_silgen_name("set_swift_callbacks")
           func set_swift_callbacks(_ write_cb: @escaping @convention(c) (UnsafePointer<CChar>?) -> Void,
                                     _ read_cb: @escaping @convention(c) (UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?)
@@ -173,7 +169,6 @@ jobs:
           @_silgen_name("start_python_interpreter")
           func start_python_interpreter()
 
-          // MARK: - Python 状态管理
           final class PythonState: ObservableObject {
               static let shared = PythonState()
               var terminalView: TerminalView?
@@ -210,7 +205,6 @@ jobs:
               }
           }
 
-          // MARK: - C 函数指针回调
           let writeCallback: @convention(c) (UnsafePointer<CChar>?) -> Void = { textPtr in
               guard let textPtr = textPtr else { return }
               PythonState.shared.writeToTerminal(String(cString: textPtr))
@@ -221,7 +215,6 @@ jobs:
               return PythonState.shared.provideInput(prompt: prompt)
           }
 
-          // MARK: - SwiftTerm 代理
           class Coordinator: NSObject, TerminalViewDelegate {
               func send(source: TerminalView, data: ArraySlice<UInt8>) {
                   PythonState.shared.handleKeyboardInput(data)
@@ -239,7 +232,6 @@ jobs:
               func notifyUpdateChanges(source: TerminalView, changes: TerminalView.UpdateChanges) {}
           }
 
-          // MARK: - SwiftUI 视图
           struct TerminalRepresentable: UIViewRepresentable {
               func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -288,7 +280,6 @@ jobs:
           }
           EOF
 
-          # 4. 注入 Info.plist
           cat << 'EOF' > TerminalApp/Info.plist
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -312,14 +303,12 @@ jobs:
           </plist>
           EOF
 
-          # 5. 编译 C 桥接
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           xcrun -sdk iphoneos clang -c TerminalApp/bridge.c -o TerminalApp/bridge.o \
             -target arm64-apple-ios16.0 -isysroot $SDK_PATH \
             -I./Python-3.16.0a2/Include \
             -I$(pwd)/built_deps/include
 
-          # 6. 编译 Swift + SwiftTerm 源码并链接 (直接链接真机 libpython3.16.a)
           TERM_SOURCES=$(find SwiftTerm/Sources/SwiftTerm -name "*.swift" -not -path "*/Portable/*" -not -path "*/Wasm/*")
           xcrun -sdk iphoneos swiftc -target arm64-apple-ios16.0 -O \
             -I./Python-3.16.0a2/Include \
@@ -330,14 +319,10 @@ jobs:
             TerminalApp/bridge.o \
             -o TerminalApp/TerminalApp
 
-          # 7. 组装无签名 IPA
           mv TerminalApp/TerminalApp TerminalApp/Info.plist TerminalApp/Payload/
           cd TerminalApp
           zip -qry ../TerminalApp.ipa Payload
 
-      # ---------------------------------------------------------
-      # 阶段 6：上传产物
-      # ---------------------------------------------------------
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
