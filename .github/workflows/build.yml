@@ -1,4 +1,4 @@
-name: Build M4 Python Terminal (ANSI 24-bit) & Unsigned IPA
+name: Build M4 Python 3.16 Terminal & Unsigned IPA
 
 on:
   workflow_dispatch:
@@ -6,327 +6,338 @@ on:
 jobs:
   build:
     runs-on: macos-latest
-    
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    # ---------------------------------------------------------
-    # 阶段 1：交叉编译 Python 3.15.2 M4 静态库 (极限优化)
-    # ---------------------------------------------------------
-    - name: Setup Host Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.15.2'
+      # ---------------------------------------------------------
+      # 阶段 1：获取源码并编译 macOS 宿主 Python 3.16
+      # ---------------------------------------------------------
+      - name: Download Python 3.16.0a2 Source
+        run: |
+          curl -O https://www.python.org/ftp/python/3.16.0/Python-3.16.0a2.tgz
+          tar -xzf Python-3.16.0a2.tgz
 
-    - name: Download & Build Python 3.15.2
-      run: |
-        # 1. 克隆 OpenSSL 源码
-        git clone --depth 1 --branch openssl-3.3.2 https://github.com/openssl/openssl.git
-        
-        # 2. 交叉编译 OpenSSL for iOS (使用官方 Configure 脚本)
-        cd openssl
-        export CROSS_TOP=$(xcode-select -p)/Platforms/iPhoneOS.platform/Developer
-        export CROSS_SDK=iPhoneOS.sdk
-        export CROSS_COMPILE=$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/bin/
-        
-        ./Configure ios64-cross no-shared no-dso no-async --prefix=$(pwd)/../built_deps
-        make -j$(sysctl -n hw.ncpu)
-        make install_sw
-        cd ..
-        
-        # 3. 导出依赖路径
-        export DEPS_INC="$(pwd)/built_deps/include"
-        export DEPS_LIB="$(pwd)/built_deps/lib"
-        
-        # 4. 下载 Python 源码
-        curl -O https://www.python.org/ftp/python/3.15.2/Python-3.15.2.tgz
-        tar -xzf Python-3.15.2.tgz
-        
-        # 5. 进入 Python 目录开始交叉编译
-        cd Python-3.15.2
-        export SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
-        
-        export CFLAGS="-O3 -mcpu=apple-m4 -target arm64-apple-ios -isysroot $SDK_PATH -I$DEPS_INC -flto -fno-strict-aliasing -fno-strict-overflow"
-        export LDFLAGS="-target arm64-apple-ios -isysroot $SDK_PATH -L$DEPS_LIB -flto -Wl,-dead_strip"
-        
-        ./configure \
-          --host=arm64-apple-ios \
-          --build=aarch64-apple-darwin \
-          --disable-shared --disable-framework --disable-test-modules \
-          --with-build-python=$(which python3) \
-          --enable-optimizations --with-lto=full \
-          --with-tail-call-interp --with-computed-gotos
+      - name: Build macOS Host Python
+        run: |
+          cd Python-3.16.0a2
+          # 编译 macOS 版本作为宿主（Host），专用于提供 --with-build-python
+          ./configure --prefix=$(pwd)/../host_python --enable-optimizations
+          make -j$(sysctl -n hw.ncpu)
+          make install
+          cd ..
+
+      # ---------------------------------------------------------
+      # 阶段 2：交叉编译 OpenSSL (仅 iOS 真机)
+      # ---------------------------------------------------------
+      - name: Download & Build OpenSSL for iOS Device
+        run: |
+          git clone --depth 1 --branch openssl-3.3.2 https://github.com/openssl/openssl.git
+          cd openssl
+          export CROSS_TOP=$(xcode-select -p)/Platforms/iPhoneOS.platform/Developer
+          export CROSS_SDK=iPhoneOS.sdk
+          export CROSS_COMPILE=$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/bin/
+          ./Configure ios64-cross no-shared no-dso no-async --prefix=$(pwd)/../built_deps
+          make -j$(sysctl -n hw.ncpu) && make install_sw
+          cd ..
+
+      # ---------------------------------------------------------
+      # 阶段 3：交叉编译 Python 3.16 iOS 静态库 (仅 iOS 真机)
+      # ---------------------------------------------------------
+      - name: Build Python for iOS Device
+        run: |
+          cd Python-3.16.0a2
+          HOST_PYTHON="$(pwd)/../host_python/bin/python3.16"
           
-        sudo sysctl -w vm.swapusage=4096 || true
-        make -j$(sysctl -n hw.ncpu) MODULE_BUILDTYPE=static
+          export SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          export DEPS_INC="$(pwd)/../built_deps/include"
+          export DEPS_LIB="$(pwd)/../built_deps/lib"
+          export CFLAGS="-O3 -mcpu=apple-m4 -target arm64-apple-ios -isysroot $SDK_PATH -I$DEPS_INC -flto -fno-strict-aliasing -fno-strict-overflow"
+          export LDFLAGS="-target arm64-apple-ios -isysroot $SDK_PATH -L$DEPS_LIB -flto -Wl,-dead_strip"
+          
+          ./configure \
+            --host=aarch64-apple-ios \
+            --build=aarch64-apple-darwin \
+            --disable-shared --disable-framework --disable-test-modules \
+            --with-build-python=$HOST_PYTHON \
+            --enable-optimizations --with-lto=full \
+            --with-tail-call-interp --with-computed-gotos
+          make -j$(sysctl -n hw.ncpu) MODULE_BUILDTYPE=static
+          cd ..
 
-    # ---------------------------------------------------------
-    # 阶段 2：获取 SwiftTerm 源码（用于 24-bit 真彩终端）
-    # ---------------------------------------------------------
-    - name: Clone SwiftTerm
-      run: |
-        git clone --depth 1 https://github.com/migueldeicaza/SwiftTerm.git
+      # ---------------------------------------------------------
+      # 阶段 4：Clone SwiftTerm 源码
+      # ---------------------------------------------------------
+      - name: Clone SwiftTerm
+        run: |
+          git clone --depth 1 https://github.com/migueldeicaza/SwiftTerm.git
 
-    # ---------------------------------------------------------
-    # 阶段 3：Heredoc 注入 C 桥接、SwiftUI 代码并编译打包
-    # ---------------------------------------------------------
-    - name: Build iOS App with SwiftTerm & Python
-      run: |
-        mkdir -p TerminalApp/Payload
+      # ---------------------------------------------------------
+      # 阶段 5：注入源码并编译打包 IPA
+      # ---------------------------------------------------------
+      - name: Build iOS App with SwiftTerm & Python
+        run: |
+          mkdir -p TerminalApp/Payload
 
-        # 1. 注入 C 桥接头文件
-        cat << 'EOF' > TerminalApp/bridge.h
-        #ifndef BRIDGE_H
-        #define BRIDGE_H
-        #include <Python.h>
-        
-        void set_swift_callbacks(void (*write_cb)(const char*), char* (*read_cb)(const char*));
-        void start_python_interpreter(void);
-        #endif
-        EOF
+          # 1. 注入 C 桥接头文件
+          cat << 'EOF' > TerminalApp/bridge.h
+          #ifndef BRIDGE_H
+          #define BRIDGE_H
+          #include <Python.h>
+          void set_swift_callbacks(void (*write_cb)(const char*), char* (*read_cb)(const char*));
+          void start_python_interpreter(void);
+          #endif
+          EOF
 
-        # 2. 注入 C 桥接实现
-        cat << 'EOF' > TerminalApp/bridge.c
-        #include "bridge.h"
-        #include <stdio.h>
-        #include <string.h>
-        #include <unistd.h>
+          # 2. 注入 C 桥接实现
+          cat << 'EOF' > TerminalApp/bridge.c
+          #include "bridge.h"
+          #include <Python.h>
+          #include <stdio.h>
+          #include <stdlib.h>
 
-        static void (*swift_write_cb)(const char* text) = NULL;
-        static char* (*swift_read_cb)(const char* prompt) = NULL;
+          static void (*swift_write_cb)(const char* text) = NULL;
+          static char* (*swift_read_cb)(const char* prompt) = NULL;
 
-        void set_swift_callbacks(void (*write_cb)(const char*), char* (*read_cb)(const char*)) {
-            swift_write_cb = write_cb;
-            swift_read_cb = read_cb;
-        }
+          void set_swift_callbacks(void (*write_cb)(const char*), char* (*read_cb)(const char*)) {
+              swift_write_cb = write_cb;
+              swift_read_cb = read_cb;
+          }
 
-        static PyObject* bridge_write(PyObject* self, PyObject* args) {
-            const char* text;
-            if (!PyArg_ParseTuple(args, "s", &text)) return NULL;
-            if (swift_write_cb) swift_write_cb(text);
-            Py_RETURN_NONE;
-        }
+          static PyObject* bridge_write(PyObject* self, PyObject* args) {
+              const char* text;
+              if (!PyArg_ParseTuple(args, "s", &text)) return NULL;
+              if (swift_write_cb) swift_write_cb(text);
+              Py_RETURN_NONE;
+          }
 
-        static PyMethodDef BridgeMethods[] = {
-            {"write", bridge_write, METH_VARARGS, "Write to terminal"},
-            {NULL, NULL, 0, NULL}
-        };
+          static PyMethodDef BridgeMethods[] = {
+              {"write", bridge_write, METH_VARARGS, "Write to terminal"},
+              {NULL, NULL, 0, NULL}
+          };
 
-        static struct PyModuleDef bridgemodule = {
-            PyModuleDef_HEAD_INIT, "swiftterm_bridge", NULL, -1, BridgeMethods
-        };
+          static struct PyModuleDef bridgemodule = {
+              PyModuleDef_HEAD_INIT,
+              "swiftterm_bridge",
+              NULL,
+              -1,
+              BridgeMethods
+          };
 
-        static char* readline_hook(FILE* stdin, FILE* stdout_file, const char* prompt) {
-            if (stdout_file) fflush(stdout_file);
-            if (swift_read_cb) return swift_read_cb(prompt);
-            return NULL;
-        }
+          static char* readline_hook(FILE* stdin, FILE* stdout_file, const char* prompt) {
+              if (stdout_file) fflush(stdout_file);
+              if (swift_read_cb) return swift_read_cb(prompt);
+              return NULL;
+          }
 
-        void start_python_interpreter(void) {
-            Py_Initialize();
-            
-            PyObject* module = PyModule_Create(&bridgemodule);
-            PyImport_AddModule("swiftterm_bridge");
-            PyObject* sys_modules = PyImport_GetModuleDict();
-            PyDict_SetItemString(sys_modules, "swiftterm_bridge", module);
-            Py_DECREF(module);
+          void start_python_interpreter(void) {
+              Py_Initialize();
+              PyObject* module = PyModule_Create(&bridgemodule);
+              PyImport_AddModule("swiftterm_bridge");
+              PyObject* sys_modules = PyImport_GetModuleDict();
+              PyDict_SetItemString(sys_modules, "swiftterm_bridge", module);
+              Py_DECREF(module);
 
-            const char* redirect_code = 
-                "import sys\n"
-                "import swiftterm_bridge\n"
-                "class TerminalOutput:\n"
-                "    def write(self, text):\n"
-                "        if text: swiftterm_bridge.write(text)\n"
-                "    def flush(self): pass\n"
-                "sys.stdout = TerminalOutput()\n"
-                "sys.stderr = TerminalOutput()\n";
-            PyRun_SimpleString(redirect_code);
+              const char* redirect_code =
+                  "import sys\n"
+                  "import swiftterm_bridge\n"
+                  "class TerminalOutput:\n"
+                  "    def write(self, text):\n"
+                  "        if text: swiftterm_bridge.write(text)\n"
+                  "    def flush(self): pass\n"
+                  "sys.stdout = TerminalOutput()\n"
+                  "sys.stderr = TerminalOutput()\n";
 
-            PyOS_ReadlineFunctionPointer = readline_hook;
-            PyRun_InteractiveLoop(stdin, "<stdin>");
-            Py_Finalize();
-        }
-        EOF
+              PyRun_SimpleString(redirect_code);
+              PyOS_ReadlineFunctionPointer = readline_hook;
+              PyRun_InteractiveLoop(stdin, "<stdin>");
+              Py_Finalize();
+          }
+          EOF
 
-        # 3. 注入 Swift UI 及 交互逻辑
-        cat << 'EOF' > TerminalApp/main.swift
-        import SwiftUI
-        import SwiftTerm
-        import UIKit
+          # 3. 注入 Swift UI 及交互逻辑
+          cat << 'EOF' > TerminalApp/main.swift
+          import SwiftUI
+          import SwiftTerm
+          import UIKit
 
-        // MARK: - C 桥接声明
-        @_silgen_name("set_swift_callbacks")
-        func set_swift_callbacks(_ write_cb: @escaping @convention(c) (UnsafePointer<CChar>?) -> Void, _ read_cb: @escaping @convention(c) (UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?)
+          // MARK: - C 桥接声明
+          @_silgen_name("set_swift_callbacks")
+          func set_swift_callbacks(_ write_cb: @escaping @convention(c) (UnsafePointer<CChar>?) -> Void,
+                                    _ read_cb: @escaping @convention(c) (UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?)
 
-        @_silgen_name("start_python_interpreter")
-        func start_python_interpreter()
+          @_silgen_name("start_python_interpreter")
+          func start_python_interpreter()
 
-        // MARK: - Python 状态管理
-        final class PythonState: ObservableObject {
-            static let shared = PythonState()
-            var terminalView: TerminalView?
-            private var inputBuffer = ""
-            private var semaphore = DispatchSemaphore(value: 0)
-            private var pendingPrompt: String?
-            
-            private init() {}
-            
-            func writeToTerminal(_ text: String) {
-                DispatchQueue.main.async {
-                    self.terminalView?.feed(text: text)
-                }
-            }
-            
-            func provideInput(prompt: String?) -> UnsafeMutablePointer<CChar>? {
-                if let p = prompt { writeToTerminal(p) }
-                semaphore.wait() 
-                
-                let result = strdup(inputBuffer)
-                inputBuffer = ""
-                return result
-            }
-            
-            func handleKeyboardInput(_ data: ArraySlice<UInt8>) {
-                if let str = String(bytes: data, encoding: .utf8) {
-                    inputBuffer += str
-                    if str.contains("\r") || str.contains("\n") {
-                        inputBuffer = inputBuffer.replacingOccurrences(of: "\r", with: "\n")
-                        semaphore.signal()
-                    }
-                }
-            }
-        }
+          // MARK: - Python 状态管理
+          final class PythonState: ObservableObject {
+              static let shared = PythonState()
+              var terminalView: TerminalView?
+              private var inputBuffer = ""
+              private var semaphore = DispatchSemaphore(value: 0)
+              private var pendingPrompt: String?
 
-        // MARK: - C 函数指针回调
-        let writeCallback: @convention(c) (UnsafePointer<CChar>?) -> Void = { textPtr in
-            guard let textPtr = textPtr else { return }
-            PythonState.shared.writeToTerminal(String(cString: textPtr))
-        }
+              private init() {}
 
-        let readCallback: @convention(c) (UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>? = { promptPtr in
-            let prompt = promptPtr != nil ? String(cString: promptPtr!) : nil
-            return PythonState.shared.provideInput(prompt: prompt)
-        }
+              func writeToTerminal(_ text: String) {
+                  DispatchQueue.main.async {
+                      self.terminalView?.feed(text: text)
+                  }
+              }
 
-        // MARK: - SwiftTerm 代理
-        class Coordinator: NSObject, TerminalViewDelegate {
-            func send(source: TerminalView, data: ArraySlice<UInt8>) {
-                PythonState.shared.handleKeyboardInput(data)
-            }
-            func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {}
-            func setTerminalTitle(source: TerminalView, title: String) {}
-            func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
-            func scrolled(source: TerminalView, position: Double) {}
-            func requestOpenLink(source: TerminalView, link: String, params: [String : String]) {}
-            func bell(source: TerminalView) {}
-            func clipboardCopy(source: TerminalView, content: Data) {}
-            func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
-            func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
-            func colorChanged(source: TerminalView, color: Int) {}
-            func notifyUpdateChanges(source: TerminalView, changes: TerminalView.UpdateChanges) {}
-        }
+              func provideInput(prompt: String?) -> UnsafeMutablePointer<CChar>? {
+                  if let p = prompt {
+                      writeToTerminal(p)
+                  }
+                  semaphore.wait()
+                  let result = strdup(inputBuffer)
+                  inputBuffer = ""
+                  return result
+              }
 
-        // MARK: - SwiftUI 视图
-        struct TerminalRepresentable: UIViewRepresentable {
-            func makeCoordinator() -> Coordinator { Coordinator() }
+              func handleKeyboardInput(_ data: ArraySlice<UInt8>) {
+                  if let str = String(bytes: data, encoding: .utf8) {
+                      inputBuffer += str
+                      if str.contains("\r") || str.contains("\n") {
+                          inputBuffer = inputBuffer.replacingOccurrences(of: "\r", with: "\n")
+                          semaphore.signal()
+                      }
+                  }
+              }
+          }
 
-            func makeUIView(context: Context) -> TerminalView {
-                let terminal = TerminalView(frame: .zero)
-                terminal.terminalDelegate = context.coordinator
-                terminal.backgroundColor = .black
-                terminal.nativeForegroundColor = .white
-                terminal.font = UIFont.monospacedSystemFont(ofSize: 14, weight: .regular)
-                
-                PythonState.shared.terminalView = terminal
-                
-                set_swift_callbacks(writeCallback, readCallback)
-                
-                DispatchQueue.global(qos: .userInitiated).async {
-                    start_python_interpreter()
-                    DispatchQueue.main.async {
-                        exit(0) 
-                    }
-                }
-                
-                return terminal
-            }
+          // MARK: - C 函数指针回调
+          let writeCallback: @convention(c) (UnsafePointer<CChar>?) -> Void = { textPtr in
+              guard let textPtr = textPtr else { return }
+              PythonState.shared.writeToTerminal(String(cString: textPtr))
+          }
 
-            func updateUIView(_ uiView: TerminalView, context: Context) {}
-        }
+          let readCallback: @convention(c) (UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>? = { promptPtr in
+              let prompt = promptPtr != nil ? String(cString: promptPtr!) : nil
+              return PythonState.shared.provideInput(prompt: prompt)
+          }
 
-        @main
-        struct App: SwiftUI.App {
-            var body: some Scene {
-                WindowGroup {
-                    ZStack(alignment: .bottom) {
-                        TerminalRepresentable()
-                            .ignoresSafeArea()
-                        
-                        HStack(spacing: 12) {
-                            Button("Ctrl") { 
-                                PythonState.shared.handleKeyboardInput([0x03]) 
-                            }.buttonStyle(.bordered).tint(.gray)
-                            
-                            Button("Opt") { }.buttonStyle(.bordered).tint(.gray)
-                            
-                            Button("Cmd") { }.buttonStyle(.bordered).tint(.gray)
-                        }
-                        .padding()
-                        .background(Color.black.opacity(0.8))
-                    }
-                }
-            }
-        }
-        EOF
+          // MARK: - SwiftTerm 代理
+          class Coordinator: NSObject, TerminalViewDelegate {
+              func send(source: TerminalView, data: ArraySlice<UInt8>) {
+                  PythonState.shared.handleKeyboardInput(data)
+              }
+              func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {}
+              func setTerminalTitle(source: TerminalView, title: String) {}
+              func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
+              func scrolled(source: TerminalView, position: Double) {}
+              func requestOpenLink(source: TerminalView, link: String, params: [String : String]) {}
+              func bell(source: TerminalView) {}
+              func clipboardCopy(source: TerminalView, content: Data) {}
+              func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
+              func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
+              func colorChanged(source: TerminalView, color: Int) {}
+              func notifyUpdateChanges(source: TerminalView, changes: TerminalView.UpdateChanges) {}
+          }
 
-        # 4. 注入 Info.plist
-        cat << 'EOF' > TerminalApp/Info.plist
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>CFBundleExecutable</key><string>TerminalApp</string>
-            <key>CFBundleIdentifier</key><string>com.anonymous.pythonterminal</string>
-            <key>CFBundleName</key><string>PythonTerminal</string>
-            <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>1.0</string>
-            <key>CFBundleVersion</key><string>1</string>
-            <key>UILaunchScreen</key><dict/>
-        </dict>
-        </plist>
-        EOF
+          // MARK: - SwiftUI 视图
+          struct TerminalRepresentable: UIViewRepresentable {
+              func makeCoordinator() -> Coordinator { Coordinator() }
 
-        # 5. 编译 C 桥接
-        SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
-        xcrun -sdk iphoneos clang -c TerminalApp/bridge.c -o TerminalApp/bridge.o \
-          -target arm64-apple-ios16.0 -isysroot $SDK_PATH \
-          -I./Python-3.15.2/Include -I$(pwd)/built_deps/include
+              func makeUIView(context: Context) -> TerminalView {
+                  let terminal = TerminalView(frame: .zero)
+                  terminal.terminalDelegate = context.coordinator
+                  terminal.backgroundColor = .black
+                  terminal.nativeForegroundColor = .white
+                  terminal.font = UIFont.monospacedSystemFont(ofSize: 14, weight: .regular)
 
-        # 6. 编译 Swift + SwiftTerm 源码 并 链接
-        TERM_SOURCES=$(find SwiftTerm/Sources/SwiftTerm -name "*.swift" -not -path "*/Portable/*" -not -path "*/Wasm/*")
-        
-        xcrun -sdk iphoneos swiftc -target arm64-apple-ios16.0 -O \
-          -I./Python-3.15.2/Include \
-          -L./Python-3.15.2 -lpython3.15 \
-          -L$(pwd)/built_deps/lib -lssl -lcrypto \
-          $TERM_SOURCES \
-          TerminalApp/main.swift \
-          TerminalApp/bridge.o \
-          -o TerminalApp/TerminalApp
+                  PythonState.shared.terminalView = terminal
+                  set_swift_callbacks(writeCallback, readCallback)
 
-        # 7. 组装无签名 IPA
-        mv TerminalApp/TerminalApp TerminalApp/Info.plist TerminalApp/Payload/
-        cd TerminalApp
-        zip -qry ../TerminalApp.ipa Payload
+                  DispatchQueue.global(qos: .userInitiated).async {
+                      start_python_interpreter()
+                      DispatchQueue.main.async { exit(0) }
+                  }
 
-    # ---------------------------------------------------------
-    # 阶段 4：上传 .a 和 .ipa
-    # ---------------------------------------------------------
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: Build-Outputs
-        path: |
-          Python-3.15.2/libpython3.15.a
-          TerminalApp.ipa
+                  return terminal
+              }
+
+              func updateUIView(_ uiView: TerminalView, context: Context) {}
+          }
+
+          @main
+          struct App: SwiftUI.App {
+              var body: some Scene {
+                  WindowGroup {
+                      ZStack(alignment: .bottom) {
+                          TerminalRepresentable()
+                              .ignoresSafeArea()
+                          HStack(spacing: 12) {
+                              Button("Ctrl") {
+                                  PythonState.shared.handleKeyboardInput([0x03])
+                              }.buttonStyle(.bordered).tint(.gray)
+                              Button("Opt") {}
+                                  .buttonStyle(.bordered).tint(.gray)
+                              Button("Cmd") {}
+                                  .buttonStyle(.bordered).tint(.gray)
+                          }
+                          .padding()
+                          .background(Color.black.opacity(0.8))
+                      }
+                  }
+              }
+          }
+          EOF
+
+          # 4. 注入 Info.plist
+          cat << 'EOF' > TerminalApp/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>TerminalApp</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.anonymous.pythonterminal</string>
+              <key>CFBundleName</key>
+              <string>PythonTerminal</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>UILaunchScreen</key>
+              <dict/>
+          </dict>
+          </plist>
+          EOF
+
+          # 5. 编译 C 桥接
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun -sdk iphoneos clang -c TerminalApp/bridge.c -o TerminalApp/bridge.o \
+            -target arm64-apple-ios16.0 -isysroot $SDK_PATH \
+            -I./Python-3.16.0a2/Include \
+            -I$(pwd)/built_deps/include
+
+          # 6. 编译 Swift + SwiftTerm 源码并链接 (直接链接真机 libpython3.16.a)
+          TERM_SOURCES=$(find SwiftTerm/Sources/SwiftTerm -name "*.swift" -not -path "*/Portable/*" -not -path "*/Wasm/*")
+          xcrun -sdk iphoneos swiftc -target arm64-apple-ios16.0 -O \
+            -I./Python-3.16.0a2/Include \
+            -L./Python-3.16.0a2 -lpython3.16 \
+            -L$(pwd)/built_deps/lib -lssl -lcrypto \
+            $TERM_SOURCES \
+            TerminalApp/main.swift \
+            TerminalApp/bridge.o \
+            -o TerminalApp/TerminalApp
+
+          # 7. 组装无签名 IPA
+          mv TerminalApp/TerminalApp TerminalApp/Info.plist TerminalApp/Payload/
+          cd TerminalApp
+          zip -qry ../TerminalApp.ipa Payload
+
+      # ---------------------------------------------------------
+      # 阶段 6：上传产物
+      # ---------------------------------------------------------
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Build-Outputs
+          path: |
+            Python-3.16.0a2/libpython3.16.a
+            TerminalApp.ipa
