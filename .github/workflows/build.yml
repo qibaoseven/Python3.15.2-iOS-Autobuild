@@ -52,6 +52,9 @@ jobs:
           export SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           export DEPS_INC="$(pwd)/../built_deps/include"
           export DEPS_LIB="$(pwd)/../built_deps/lib"
+          
+          # 修复核心：显式指定 CC，并清理可能引起冲突的默认 CFLAGS
+          export CC="$(xcrun --sdk iphoneos -f clang)"
           export CFLAGS="-O3 -mcpu=apple-m4 -target arm64-apple-ios -isysroot $SDK_PATH -I$DEPS_INC -flto -fno-strict-aliasing -fno-strict-overflow"
           export LDFLAGS="-target arm64-apple-ios -isysroot $SDK_PATH -L$DEPS_LIB -flto -Wl,-dead_strip"
           
@@ -62,6 +65,7 @@ jobs:
             --with-build-python=$HOST_PYTHON \
             --enable-optimizations --with-lto=full \
             --with-tail-call-interp --with-computed-gotos
+          
           make -j$(sysctl -n hw.ncpu) MODULE_BUILDTYPE=static
           cd ..
 
