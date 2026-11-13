@@ -11,14 +11,46 @@ jobs:
         uses: actions/checkout@v4
 
       # ---------------------------------------------------------
+      # 缓存机制 1：缓存 Host Python
+      # ---------------------------------------------------------
+      - name: Cache Host Python
+        id: cache-host-python
+        uses: actions/cache@v4
+        with:
+          path: host_python
+          key: ${{ runner.os }}-host-python-3.16.0a2-v1
+
+      # ---------------------------------------------------------
+      # 缓存机制 2：缓存第三方依赖 (OpenSSL + libffi)
+      # ---------------------------------------------------------
+      - name: Cache Third-party Dependencies
+        id: cache-deps
+        uses: actions/cache@v4
+        with:
+          path: built_deps
+          key: ${{ runner.os }}-deps-openssl-3.3.2-libffi-3.4.6-v1
+
+      # ---------------------------------------------------------
+      # 缓存机制 3：缓存编译好的交叉编译 Python 目录
+      # ---------------------------------------------------------
+      - name: Cache Compiled CPython
+        id: cache-cpython
+        uses: actions/cache@v4
+        with:
+          path: Python-3.16.0a2
+          key: ${{ runner.os }}-cpython-3.16.0a2-m4-v1
+
+      # ---------------------------------------------------------
       # 阶段 1：获取源码并编译 macOS 宿主 Python 3.16
       # ---------------------------------------------------------
       - name: Download Python 3.16.0a2 Source
+        if: steps.cache-cpython.outputs.cache-hit != 'true'
         run: |
           curl -O https://www.python.org/ftp/python/3.16.0/Python-3.16.0a2.tgz
           tar -xzf Python-3.16.0a2.tgz
 
       - name: Build macOS Host Python
+        if: steps.cache-host-python.outputs.cache-hit != 'true'
         run: |
           cd Python-3.16.0a2
           ./configure --prefix=$(pwd)/../host_python --enable-optimizations
@@ -27,10 +59,12 @@ jobs:
           cd ..
 
       # ---------------------------------------------------------
-      # 阶段 2：交叉编译 OpenSSL (仅 iOS 真机)
+      # 阶段 2：交叉编译 OpenSSL 与 libffi (仅 iOS 真机)
       # ---------------------------------------------------------
-      - name: Download & Build OpenSSL for iOS Device
+      - name: Download & Build OpenSSL and libffi for iOS
+        if: steps.cache-deps.outputs.cache-hit != 'true'
         run: |
+          # 1. 编译 OpenSSL
           git clone --depth 1 --branch openssl-3.3.2 https://github.com/openssl/openssl.git
           cd openssl
           export CROSS_TOP=$(xcode-select -p)/Platforms/iPhoneOS.platform/Developer
@@ -40,14 +74,10 @@ jobs:
           make -j$(sysctl -n hw.ncpu) && make install_sw
           cd ..
 
-      # ---------------------------------------------------------
-      # 阶段 2.5：交叉编译 libffi for iOS (修复 _ctypes)
-      # ---------------------------------------------------------
-      - name: Build libffi for iOS Device
-        run: |
-          git clone --depth 1 https://github.com/libffi/libffi.git
-          cd libffi
-          ./autogen.sh
+          # 2. 编译 libffi (使用 Release Tarball 避免 autoreconf 报错)
+          curl -L -O https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz
+          tar -xzf libffi-3.4.6.tar.gz
+          cd libffi-3.4.6
           export SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           export CC="$(xcrun --sdk iphoneos -f clang)"
           ./configure \
@@ -66,6 +96,7 @@ jobs:
       # 阶段 3：交叉编译 Python 3.16 iOS 静态库 (仅 iOS 真机)
       # ---------------------------------------------------------
       - name: Build Python for iOS Device
+        if: steps.cache-cpython.outputs.cache-hit != 'true'
         run: |
           cd Python-3.16.0a2
           HOST_PYTHON="$(pwd)/../host_python/bin/python3.16"
@@ -74,18 +105,14 @@ jobs:
           export DEPS_INC="$(pwd)/../built_deps/include"
           export DEPS_LIB="$(pwd)/../built_deps/lib"
           
-          # 修复 1：显式指定编译器工具链
           export CC="$(xcrun --sdk iphoneos -f clang)"
           export CPP="$(xcrun --sdk iphoneos -f clang) -E"
           export AR="$(xcrun -f ar)"
           export LLVM_AR="$(xcrun -f ar)"
           export RANLIB="$(xcrun -f ranlib)"
           export LLVM_PROFDATA="$(xcrun -f llvm-profdata 2>/dev/null || echo 'true')"
-          
-          # 修复 2：在 configure 阶段显式声明 MODULE_BUILDTYPE=static
           export MODULE_BUILDTYPE=static
           
-          # 修复 3：为 _ctypes 指定 iOS 版 libffi 的路径 (关键)
           export LIBFFI_CFLAGS="-I$DEPS_INC"
           export LIBFFI_LIBS="-L$DEPS_LIB -lffi"
           
