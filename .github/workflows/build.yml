@@ -41,6 +41,28 @@ jobs:
           cd ..
 
       # ---------------------------------------------------------
+      # 阶段 2.5：交叉编译 libffi for iOS (修复 _ctypes)
+      # ---------------------------------------------------------
+      - name: Build libffi for iOS Device
+        run: |
+          git clone --depth 1 https://github.com/libffi/libffi.git
+          cd libffi
+          ./autogen.sh
+          export SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          export CC="$(xcrun --sdk iphoneos -f clang)"
+          ./configure \
+            --host=aarch64-apple-ios \
+            --build=aarch64-apple-darwin \
+            --prefix=$(pwd)/../built_deps \
+            --disable-shared --enable-static \
+            CC="$CC" \
+            CFLAGS="-O3 -mcpu=apple-m4 -target arm64-apple-ios -isysroot $SDK_PATH -flto" \
+            LDFLAGS="-target arm64-apple-ios -isysroot $SDK_PATH -flto"
+          make -j$(sysctl -n hw.ncpu)
+          make install
+          cd ..
+
+      # ---------------------------------------------------------
       # 阶段 3：交叉编译 Python 3.16 iOS 静态库 (仅 iOS 真机)
       # ---------------------------------------------------------
       - name: Build Python for iOS Device
@@ -63,6 +85,10 @@ jobs:
           # 修复 2：在 configure 阶段显式声明 MODULE_BUILDTYPE=static
           export MODULE_BUILDTYPE=static
           
+          # 修复 3：为 _ctypes 指定 iOS 版 libffi 的路径 (关键)
+          export LIBFFI_CFLAGS="-I$DEPS_INC"
+          export LIBFFI_LIBS="-L$DEPS_LIB -lffi"
+          
           export CFLAGS="-O3 -mcpu=apple-m4 -target arm64-apple-ios -isysroot $SDK_PATH -I$DEPS_INC -flto -fno-strict-aliasing -fno-strict-overflow"
           export LDFLAGS="-target arm64-apple-ios -isysroot $SDK_PATH -L$DEPS_LIB -flto -Wl,-dead_strip"
           
@@ -72,7 +98,8 @@ jobs:
             --disable-shared --disable-framework --disable-test-modules \
             --with-build-python=$HOST_PYTHON \
             --enable-optimizations --with-lto=full \
-            --with-tail-call-interp --with-computed-gotos
+            --with-tail-call-interp --with-computed-gotos \
+            --with-system-ffi
           
           make -j$(sysctl -n hw.ncpu) MODULE_BUILDTYPE=static
           cd ..
@@ -321,7 +348,7 @@ jobs:
           xcrun -sdk iphoneos swiftc -target arm64-apple-ios16.0 -O \
             -I./Python-3.16.0a2/Include \
             -L./Python-3.16.0a2 -lpython3.16 \
-            -L$(pwd)/built_deps/lib -lssl -lcrypto \
+            -L$(pwd)/built_deps/lib -lssl -lcrypto -lffi \
             $TERM_SOURCES \
             TerminalApp/main.swift \
             TerminalApp/bridge.o \
